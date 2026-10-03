@@ -1,5 +1,5 @@
 import os
-import subprocess
+import docker
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -7,24 +7,58 @@ from google.genai import types
 load_dotenv()
 api_key = os.environ.get("GEMINI_API_KEY")
 client = genai.Client(api_key=api_key)
+docker_client = docker.from_env()
 
-# Tool 1: Execute test runner
+# Tool 1: Sandboxed Test Runner
 def run_tests() -> dict:
-    """Runs the pytest test suite in sandbox_repo and returns stdout, stderr, and exit code."""
-    print("\n[Tool: run_tests] Running pytest on sandbox_repo...")
-    result = subprocess.run(
-        ["pytest", "sandbox_repo/test_math.py"],
-        capture_output=True,
-        text=True,
-    )
-    passed = (result.returncode == 0)
-    print(f"  >>> Result: {'PASSED' if passed else 'FAILED'}")
-    return {
-        "passed": passed,
-        "exit_code": result.returncode,
-        "stdout": result.stdout,
-        "stderr": result.stderr,
+    """
+    Runs pytest inside an isolated Docker container on sandbox_repo.
+    Returns whether the tests passed, the exit code, and the execution logs.
+    """
+    host_repo_path = os.path.abspath("sandbox_repo")
+    print(f"\n[Tool: run_tests] Running sandboxed pytest on {host_repo_path}...")
+
+    volumes = {
+        host_repo_path: {
+            "bind": "/workspace",
+            "mode": "rw"
+        }
     }
+
+    container = None
+    try:
+        container = docker_client.containers.run(
+            image="python:3.10-slim",
+            command='sh -c "pip install --quiet --disable-pip-version-check pytest && pytest /workspace/test_math.py"',
+            volumes=volumes,
+            working_dir="/workspace",
+            detach=True,
+            remove=False
+        )
+
+        result = container.wait()
+        exit_code = result.get("StatusCode", 1)
+        logs = container.logs(stdout=True, stderr=True).decode("utf-8", errors="replace")
+
+        passed = (exit_code == 0)
+        print(f"  >>> Sandbox Exit Code: {exit_code} | Result: {'PASSED' if passed else 'FAILED'}")
+        return {
+            "passed": passed,
+            "exit_code": exit_code,
+            "output": logs
+        }
+    except Exception as e:
+        return {
+            "passed": False,
+            "exit_code": -1,
+            "output": str(e)
+        }
+    finally:
+        if container:
+            try:
+                container.remove(force=True)
+            except Exception:
+                pass
 
 # Tool 2: Read source file
 def read_file(file_path: str) -> dict:
@@ -48,9 +82,9 @@ def write_file(file_path: str, new_content: str) -> dict:
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-# Create the chat session with all 3 tools
+# Create the agent session with the sandboxed tools
 chat = client.chats.create(
-    model="gemini-3.6-flash",
+    model="gemini-2.5-flash",
     config=types.GenerateContentConfig(
         tools=[run_tests, read_file, write_file],
         temperature=0.0,
@@ -60,7 +94,7 @@ chat = client.chats.create(
 prompt = (
     "You are an autonomous CI repair agent. Your objective is to ensure all tests in "
     "sandbox_repo pass. First, run the tests to find the error. If they fail, inspect the relevant "
-    "file, write a fix, and rerun the tests. Do not stop until run_tests reports passed=True."
+    "file, write a fix, and rerun the tests in the sandbox. Do not stop until run_tests reports passed=True."
 )
 
 print(f"Goal: {prompt}\n")
