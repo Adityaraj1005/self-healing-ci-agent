@@ -1,4 +1,18 @@
-.env
+# Python environment & virtualenv
 venv/
+ENV/
+env/
+.venv/
+
+# Environment variables & secrets
+.env
+
+# Bytecode & Cache
 __pycache__/
+*.py[cod]
+*$py.class
 .pytest_cache/
+
+# OS-specific clutter
+.DS_Store
+Thumbs.db
