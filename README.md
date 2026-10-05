@@ -172,3 +172,12 @@ GROQ_API_KEY=your_groq_api_key_here
 ### 2. Preventing Infinite AI Repair Loops
 - **The Problem:** If an automated patch introduced a new bug, a basic agent loop could repeatedly attempt fixes indefinitely, burning API tokens and getting stuck in cycles.
 - **The Fix:** Built the workflow using LangGraph as a finite state machine with strict condition checks and a hard limit of 3 repair attempts before stopping and alerting the user.
+
+
+---
+
+## ⚠️ Current Limitations
+
+- **Single-File Fixes Only:** The agent is designed to find and patch one broken function or file at a time. It cannot yet resolve complex bugs that require simultaneous changes across multiple different files.
+- **Python-Specific:** The AST scanner and Docker test environment currently only support Python codebases and `pytest` test suites.
+- **Local Sandbox Setup:** The system is built to test within a local repository folder. It does not yet connect directly to live cloud GitHub repositories or multi-tenant servers.
