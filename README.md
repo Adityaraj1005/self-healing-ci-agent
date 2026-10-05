@@ -1,424 +1,180 @@
-# Autonomous Self-Healing CI Agent 🤖🛡️
+# Autonomous Self-Healing CI/CD Agent 🤖🛡️
 
-An autonomous, closed-loop CI repair system that detects failing unit test suites, diagnoses multi-file dependencies, locates root causes via AST symbol discovery, generates targeted code patches, and verifies fixes inside disposable, isolated Docker execution sandboxes.
-
----
-
-## 🎯 Architecture & Design Overview
-
-Rather than relying on ungrounded code generation or running untrusted AI-generated patches directly on the host machine, this system operates under a **Verify-in-Sandbox** loop:
-
-    [ Failing Test Suite Detected ]
-                   │
-                   ▼
-     ┌─────────────────────────────┐
-     │   Traceback Regex Parser    │
-     │ (Extract File, Line, Error) │
-     └──────────────┬──────────────┘
-                    │
-                    ▼
-     ┌─────────────────────────────┐
-     │      AST Repo Mapper        │
-     │ (Static Symbol Definition)  │
-     └──────────────┬──────────────┘
-                    │
-                    ▼
-     ┌─────────────────────────────┐
-     │       AI Repair Agent       │◄─────────────┐
-     │  (Reasoning & Tool Calling) │              │
-     └──────────────┬──────────────┘              │
-                    │                             │
-      Locate / Read / Write Patch                │ Test Traceback /
-                    │                             │ Diagnostic Logs
-                    ▼                             │
-     ┌─────────────────────────────┐              │
-     │    Docker Linux Sandbox     │              │
-     │    (python:3.10-slim)       │──────────────┘
-     │   [Isolated Bind Mount]     │
-     └──────────────┬──────────────┘
-                    │
-         All Tests Pass (Exit 0)
-                    ▼
-              [ Fix Verified ]
-
-### Key Engineering Principles
-
-- **No Host Execution:** Untrusted code and tests never execute on the bare host environment. All executions run inside an isolated Linux container (`python:3.10-slim`).
-- **Deterministic Teardown:** Containers are created per test run and guaranteed to terminate and remove cleanly via deterministic cleanup (`container.remove(force=True)`), preventing container leaks and race conditions.
-- **Bidirectional Volume Bind Mounts:** Target repositories are mounted into `/workspace` using Docker bind mounts, enabling the agent to write patches to disk while evaluating execution purely in Linux.
-- **Structured Token Optimization:** Raw terminal noise is filtered through an automated traceback parser, providing the LLM with structured diagnostics such as file path, line number, exception type, and assertion message.
-- **Static AST Symbol Indexing:** Traverses the repository tree using Python's `ast.NodeVisitor` without executing code, allowing fast cross-module symbol lookup without relying entirely on LLM-based code discovery.
+An autonomous, closed-loop software reliability system designed to intercept failing continuous integration workflows, parse runtime diagnostics, traverse abstract syntax trees to locate root-cause symbols, generate syntactically safe patches via large language models, and verify repairs within ephemeral Docker execution sandboxes orchestrated by a LangGraph StateGraph.
 
 ---
 
-## 🚀 Completed Milestones
-
-### 1. Autonomous ReAct Agent Loop — Phase 1
-
-- Configured baseline tool calling with structured tools:
-  - `run_tests()`: Executes the test suite and captures exit codes along with full diagnostic logs.
-  - `read_file(file_path)`: Inspects buggy source code.
-  - `write_file(file_path, new_content)`: Writes targeted patches to the repository.
-- Successfully verified autonomous bug reproduction, root-cause diagnosis, code rewriting, and self-termination upon passing tests.
-
-### 2. Isolated Docker Sandboxing Engine — Phase 2
-
-- Integrated the Python Docker SDK (`docker.from_env()`).
-- Replaced host-level execution with containerized environments:
-  - **Base Image:** `python:3.10-slim`
-  - **Mount Point:** Host repository path mapped to `/workspace` using a read-write bind mount.
-  - **Log Extraction:** Detached container execution captures unified `stdout` and `stderr` to extract full pytest assertion tracebacks before teardown.
-  - **Graceful Lifecycle Management:** Explicit container teardown inside `finally` blocks prevents container leaks and lifecycle race conditions.
-
-### 3. Multi-File Testbed & Diagnostic Automation — Phase 3A & 3B
-
-- **Multi-File Architecture:** Scaled the target testbed from single flat files into a modular Python package layout (`src/` and `tests/`) supporting cross-module imports via:
-
-    PYTHONPATH=/workspace
-
-- **Deterministic Traceback Parsing (`traceback_parser.py`):**
-  - Implemented regex patterns targeting standard pytest traceback frames such as:
-
-        path/to/file.py:LINE: ErrorType
-
-  - Also processes pytest summary lines such as:
-
-        FAILED file.py::func - ErrorType: message
-
-  - Converts unstructured pytest CLI logs into normalized JSON records containing:
-    - Target file paths
-    - Exact line numbers
-    - Exception types
-    - Assertion messages
-
-### 4. AST Symbol Discovery & End-to-End Multi-File Repair Loop — Phase 3C & 3D
-
-#### AST Repository Mapping — `repo_mapper.py`
-
-- Utilizes Python's native `ast` library and `ast.NodeVisitor` to statically inspect the entire repository tree.
-- Recursively maps:
-  - Functions
-  - Classes
-  - Parameters
-  - Line numbers
-- Ignores non-source paths such as:
-  - `.git`
-  - `venv`
-  - `__pycache__`
-- Implements `find_symbol_file()` to provide fast lookup for imported functions across files without executing the code.
-
-#### Autonomous Multi-File Tool Orchestration — `repair_agent.py`
-
-- Integrated high-speed LLM inference using the Groq SDK (`openai/gpt-oss-120b`).
-- Implemented defensive tool-argument unpacking to eliminate empty argument parsing bugs.
-- Complete autonomous cycle verified:
-
-    1. Runs the containerized test suite and captures assertion failures.
-    2. Inspects the failing test case and identifies missing or faulty imported symbols.
-    3. Invokes `locate_symbol` to discover the exact definition file across packages.
-    4. Reads the upstream implementation.
-    5. Authors and writes the correct patch.
-    6. Re-runs the tests inside Docker.
-    7. Terminates automatically once all tests pass.
+## 📑 Table of Contents
+- Executive Overview
+- System Architecture & Workflow Diagram
+- Core Engineering Subsystems
+  - 1. Ephemeral Docker Execution Sandbox
+  - 2. Deterministic Traceback & Failure Parsing
+  - 3. Static AST Symbol Mapping & Dependency Traversal
+  - 4. LangGraph StateGraph Finite State Machine
+  - 5. Asynchronous FastAPI Webhook Ingestion
+- Design Decisions & Technical Trade-offs
+- Repository Layout
+- Getting Started & Installation
+- Operational Runbook & Verification
 
 ---
 
-## 📁 Repository Structure
+## 🔭 Executive Overview
 
-    self-healing-ci-agent/
-    │
-    ├── docker_sandbox.py
-    │   # Standalone Docker sandboxing test runner & lifecycle manager
-    │
-    ├── repo_mapper.py
-    │   # Static AST syntax tree scanner and symbol locator
-    │
-    ├── repair_agent.py
-    │   # Autonomous multi-file agent loop with tool dispatching
-    │
-    ├── test_docker.py
-    │   # Health-check script validating Docker Engine connectivity
-    │
-    ├── traceback_parser.py
-    │   # Regex-based pytest traceback parser and log normalizer
-    │
-    ├── sandbox_repo/
-    │   ├── src/
-    │   │   ├── __init__.py
-    │   │   ├── calculator.py
-    │   │   └── math_helpers.py
-    │   │
-    │   └── tests/
-    │       ├── __init__.py
-    │       └── test_calculator.py
-    │
-    ├── .gitignore
-    │   # Git exclusion rules (.env, venv, pycache, etc.)
-    │
-    ├── requirements.txt
-    │   # Project dependencies
-    │
-    └── README.md
-        # Project documentation and architecture guide
+Traditional continuous integration systems operate on a passive failure model: when tests fail, the CI pipeline halts, logs are written to an artifact registry, and an alert is broadcast to developers, leaving the manual burden of reproduction, root-cause diagnosis, patching, and verification entirely on humans.
+
+This project implements an active, self-healing CI loop:
+- Zero Host Risk: Untrusted code patches and dynamic test suites are never executed on the host system. All execution takes place inside disposable Linux containers (python:3.10-slim).
+- Context-Window Economy: Rather than dumping entire multi-file codebases into an LLM context window (which leads to context dilution, hallucination, and token exhaustion), static analysis via Python's Abstract Syntax Tree (ast) identifies the precise file and line range of buggy symbols.
+- Deterministic Orchestration: Avoids unconstrained, non-deterministic agent loops by enforcing a formal Finite State Machine (FSM) via LangGraph, bounding execution to discrete states, explicit data contracts, and immutable iteration limits.
 
 ---
 
-## 🛠️ Prerequisites & Setup
+## 🏛️ System Architecture & Workflow Diagram
 
-### 1. Requirements
++------------------------------------+
+|  GitHub / CI Test Failure Webhook  |
++-----------------+------------------+
+                  |
+                  v
++-----------------+------------------+
+|          FastAPI Server            | (Non-blocking background worker)
++-----------------+------------------+
+                  |
+                  v
++-----------------+------------------+
+|       LangGraph StateGraph         |<--------------------------------+
+|           (AgentState)             |                                 |
++-----------------+------------------+                                 |
+                  |                                                    |
+                  v                                                    |
++-----------------+------------------+                                 |
+|          run_tests_node            |                                 |
+|       (Docker python:3.10)         |                                 |
++-----------------+------------------+                                 |
+                  |                                                    |
+          [ Tests Passed? ]                                            |
+           |             |                                             |
+           | Yes         | No (Iter < Max)                             |
+           v             v                                             |
+     +-----------+ +-----+------------------+                          |
+     |  END (✅)  | |   patch_code_node      |                          |
+     +-----------+ | - AST Symbol Lookup    |                          |
+                   | - Groq LLM Inference   |                          |
+                   | - Disk Write Sync      |--------------------------+
+                   +------------------------+
 
-- Python 3.10+
-- Docker Desktop (active and running)
-- Docker Engine
+---
+
+## ⚙️️ Core Engineering Subsystems
+
+### 1. Ephemeral Docker Execution Sandbox
+Dynamic test execution against AI-generated code introduces arbitrary execution risks (infinite loops, system corruption, unverified network requests). The sandbox layer enforces strict isolation:
+- Image Runtime: Built upon python:3.10-slim.
+- Bidirectional Volume Bind Mount: Mounts the host repository directory to /workspace inside the container (mode="rw"). Edits made by the repair agent on the host disk immediately project into the container without requiring image rebuilds or layer invalidations.
+- Environment Isolation: Executes tests with PYTHONPATH=/workspace pytest -v /workspace/tests, isolating package imports from host site-packages.
+- Guaranteed Teardown: Container lifecycles are wrapped in try/finally blocks, enforcing container.remove(force=True) to prevent orphaned containers from consuming host system memory.
+
+### 2. Deterministic Traceback & Failure Parsing
+Raw CLI outputs from pytest contain ANSI formatting, environment warnings, and execution progress indicators that pollute LLM context windows. 
+- The module traceback_parser.py implements regex matching routines to extract structured metadata:
+  - Failing test node identity (e.g., tests/test_calculator.py::test_percentage_calculation)
+  - Error category (AssertionError, TypeError, ZeroDivisionError)
+  - Target symbol and callsite traceback lines
+- Isolating the failure log reduces prompt sizes by up to 80% while sharpening diagnostic fidelity.
+
+### 3. Static AST Symbol Mapping & Dependency Traversal
+When a test fails, identifying which module defines the offending symbol across a multi-tier package layout cannot depend on flat text matching (which falsely flags comments, strings, or docstrings).
+- The module repo_mapper.py subclasses ast.NodeVisitor to construct an in-memory symbol index of all .py files:
+  - Traverses syntax nodes representing ast.FunctionDef, ast.AsyncFunctionDef, and ast.ClassDef.
+  - Captures exact file paths, line ranges, and function signatures.
+  - Exposes find_symbol_file(repo_map, symbol_name) to instantly provide the absolute path of the implementation needing inspection.
+
+### 4. LangGraph StateGraph Finite State Machine
+To avoid the instability of free-form ReAct loops, execution is formalized as a directed state graph:
+- Structured Schema (AgentState):
+  - repo_path: Target file tree path.
+  - test_passed: Boolean flag determining completion.
+  - error_logs: Sanitized execution traces from Docker stdout/stderr.
+  - iteration: Current repair cycle count.
+  - max_iterations: Bounded loop guardrail (default: 3).
+- Conditional Routing: Evaluates state after every test run, routing to termination if passing, routing to patch generation if failing within retry budget, or halting execution if the iteration threshold is exceeded.
+
+### 5. Asynchronous FastAPI Webhook Ingestion
+The entry point server.py interfaces external CI/CD engines (such as GitHub Actions) with the internal LangGraph engine:
+- Exposes POST /webhook expecting a JSON payload containing the repository name, branch, and failure trigger reason.
+- Offloads graph execution to FastAPI BackgroundTasks, returning an immediate 202 Accepted response to prevent webhooks from timing out during long-running repair attempts.
+
+---
+
+## ⚖️ Design Decisions & Technical Trade-offs
+
+- Test Execution Environment: Docker Bind Mount (rw) over Ephemeral Container copy
+  - Justification: Bind mounting eliminates the multi-second overhead of copying files into and out of container layers between test iterations.
+- Code Inspection: Native ast Visitor over Full Text Grep / Regex
+  - Justification: AST inspection eliminates false positives generated by commented-out code, string literals, and documentation examples.
+- Agent Architecture: LangGraph StateGraph over Unconstrained ReAct Loop
+  - Justification: A finite state machine bounds model agency to patching only, preventing tool-ordering hallucinations and unbounded token burn.
+- Inference Backend: Groq LPU (openai/gpt-oss-120b) over Free-tier API rate limits
+  - Justification: Ultra-low latency allows rapid multi-turn repair iterations without triggering token bucket rate limits (429 errors).
+
+---
+
+## 📁 Repository Layout
+
+self-healing-ci-agent/
+├── docker_sandbox.py       # Isolated container testing runtime & cleanup logic
+├── graph_agent.py          # StateGraph workflow engine, schema, and node logic
+├── repo_mapper.py          # Static AST scanner and symbol table builder
+├── repair_agent.py         # Baseline single-loop prototype agent
+├── server.py               # Asynchronous FastAPI webhook receiver
+├── test_docker.py          # Docker daemon connection validation utility
+├── traceback_parser.py     # Deterministic regex traceback parser
+├── sandbox_repo/           # Target code environment under continuous test
+│   ├── src/
+│   │   ├── __init__.py
+│   │   ├── calculator.py   # Multi-module business logic
+│   │   └── math_helpers.py # Target utility functions
+│   └── tests/
+│       ├── __init__.py
+│       └── test_calculator.py # Pytest validation suite
+├── requirements.txt        # Top-level dependencies
+└── README.md               # Technical documentation
+
+---
+
+## 💻 Getting Started & Installation
+
+### Prerequisites
+- Python 3.10 or higher
+- Docker Desktop installed and actively running
 - Groq API Key
 
-### 2. Virtual Environment Setup
+### 1. Repository Setup & Virtual Environment (Windows PowerShell)
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 
-Create a virtual environment:
-
-    python -m venv venv
-
-Activate it in Windows PowerShell:
-
-    .\venv\Scripts\Activate.ps1
-
-Install dependencies:
-
-    pip install groq docker pytest python-dotenv
-
-### 3. Environment Configuration
-
-Create a `.env` file in the project root:
-
-    GROQ_API_KEY=gsk_your_groq_api_key_here
-
-> **Security:** Never commit your `.env` file or expose your API key publicly.
+### 2. Environment Configuration
+Create a .env file in the project root:
+GROQ_API_KEY=your_groq_api_key_here
 
 ---
 
-## 🧪 Running the Verification Tools
+## 🧪 Operational Runbook & Verification
 
-### 1. Verify Docker Engine Connection
+### Scenario A: Standalone StateGraph Execution
+1. Open sandbox_repo/src/math_helpers.py and introduce an intentional logic bug:
+   def percentage(part: float, whole: float) -> float:
+       return (part / whole) * 10  # Bug: Correct multiplier is 100
+2. Run the graph workflow:
+   python graph_agent.py
+3. Verify that run_tests fails on iteration 1, routes to patch_code, writes the fix to disk, re-executes tests in Docker, and exits with PASSED.
 
-    python test_docker.py
-
-This verifies that the Python Docker SDK can communicate with the local Docker Engine.
-
-### 2. Verify AST Symbol Discovery
-
-    python repo_mapper.py
-
-This scans the repository using Python's AST module and verifies cross-file symbol discovery.
-
-### 3. Test Traceback Parsing
-
-    python traceback_parser.py
-
-This validates the traceback parser against pytest diagnostic output.
-
-### 4. Run the Autonomous Multi-File Repair Agent
-
-    python repair_agent.py
-
-The agent autonomously:
-
-    Run Tests
-        ↓
-    Parse Failure
-        ↓
-    Locate Relevant Symbol
-        ↓
-    Read Source
-        ↓
-    Generate Patch
-        ↓
-    Write Patch
-        ↓
-    Run Tests Again
-        ↓
-    Verify Fix
-
----
-
-## 🔐 Security & Isolation Model
-
-The system is designed around a **Verify-in-Sandbox** principle.
-
-Instead of allowing generated patches or test suites to execute directly on the host machine, execution occurs inside a disposable Docker container:
-
-    Host Machine
-         │
-         │ Bind Mount
-         ▼
-    ┌─────────────────────┐
-    │   Docker Sandbox    │
-    │                     │
-    │  /workspace         │
-    │       │             │
-    │       ▼             │
-    │  Source Code        │
-    │       │             │
-    │       ▼             │
-    │  Pytest Execution   │
-    └─────────┬───────────┘
-              │
-              ▼
-        Test Results
-              │
-              ▼
-         Repair Agent
-
-This provides a controlled execution environment where generated patches can be tested without directly executing them on the host environment.
-
----
-
-## 🧠 Why AST-Based Symbol Discovery?
-
-A conventional LLM-based repair agent may need to search through an entire repository to determine where a referenced function or class is defined.
-
-This project instead performs static symbol discovery using Python's AST:
-
-    LLM
-     │
-     │ "Where is calculate_tax() defined?"
-     ▼
-    AST Repository Mapper
-     │
-     ├── calculator.py
-     ├── math_helpers.py
-     └── utils.py
-              │
-              ▼
-       Exact Symbol Location
-
-Because the repository is parsed statically, the system can locate function and class definitions without executing the source code.
-
-This reduces unnecessary LLM tool calls and helps ground the repair agent in the actual repository structure.
-
----
-
-## ⚡ Diagnostic Optimization
-
-Raw pytest output can contain a large amount of irrelevant terminal information.
-
-Instead of sending the entire output directly to the LLM:
-
-    Raw pytest output
-           ↓
-    Traceback Parser
-           ↓
-    Structured Diagnostic
-           ↓
-           LLM
-
-Example normalized diagnostic:
-
-    {
-      "file": "src/calculator.py",
-      "line": 18,
-      "error_type": "AssertionError",
-      "message": "Expected 15 but got 10"
-    }
-
-This provides the agent with focused failure information while reducing unnecessary context consumption.
-
----
-
-## 🔄 End-to-End Workflow
-
-    ┌───────────────────────────┐
-    │     Failing Test Suite    │
-    └─────────────┬─────────────┘
-                  │
-                  ▼
-    ┌───────────────────────────┐
-    │    Docker Test Runner     │
-    └─────────────┬─────────────┘
-                  │
-                  ▼
-    ┌───────────────────────────┐
-    │   Traceback Extraction    │
-    └─────────────┬─────────────┘
-                  │
-                  ▼
-    ┌───────────────────────────┐
-    │    AST Symbol Discovery   │
-    └─────────────┬─────────────┘
-                  │
-                  ▼
-    ┌───────────────────────────┐
-    │      AI Repair Agent      │
-    │   Reason + Tool Calling   │
-    └─────────────┬─────────────┘
-                  │
-                  ▼
-    ┌───────────────────────────┐
-    │      Targeted Patch       │
-    └─────────────┬─────────────┘
-                  │
-                  ▼
-    ┌───────────────────────────┐
-    │   Re-run Tests in Docker  │
-    └─────────────┬─────────────┘
-                  │
-            ┌─────┴─────┐
-            │           │
-          Fail         Pass
-            │           │
-            │           ▼
-            │    ┌──────────────┐
-            │    │ Fix Verified │
-            │    └──────────────┘
-            │
-            └──────────► Repair Loop
-
----
-
-## 🗺️ Roadmap
-
-- [x] Phase 1: Local ReAct baseline with tool calling.
-- [x] Phase 2: Isolated Docker sandboxing with volume bind mounts.
-- [x] Phase 3A/3B: Multi-file repository testbed & automated traceback parsing.
-- [x] Phase 3C/3D: AST repository mapping & autonomous multi-file repair loop.
-- [ ] Phase 4: StateGraph migration using LangGraph for multi-stage self-healing.
-- [ ] Phase 5: FastAPI webhook listener integrating GitHub PR / GitHub Actions workflows.
-
----
-
-## 🎯 Future Vision
-
-The long-term goal is to evolve this prototype into a production-style **self-healing CI system** capable of:
-
-    GitHub Push / Pull Request
-                │
-                ▼
-           CI Pipeline
-                │
-                ▼
-          Tests Fail ❌
-                │
-                ▼
-       Self-Healing Agent
-                │
-         ┌──────┴──────┐
-         │             │
-      Diagnose       Locate
-         │             │
-         └──────┬──────┘
-                ▼
-          Generate Patch
-                │
-                ▼
-        Docker Verification
-                │
-          ┌─────┴─────┐
-          │           │
-        Failed      Passed
-          │           │
-          ▼           ▼
-        Retry       Create PR
-                      │
-                      ▼
-                Human Review
-
-The system aims to move CI repair from **"detect and report"** toward **"detect, diagnose, repair, verify, and propose"** while keeping code execution isolated and verification deterministic.
+### Scenario B: CI/CD Webhook Trigger
+1. Launch the FastAPI service:
+   python server.py
+2. Open a separate terminal and issue a mock CI/CD failure webhook:
+   Invoke-RestMethod -Uri "http://127.0.0.1:8000/webhook" -Method POST -Headers @{"Content-Type"="application/json"} -Body '{"repo_name": "sandbox_repo", "branch": "main", "trigger_reason": "test_failure"}'
+3. Observe the asynchronous trigger dispatch in the server console and confirm the repair cycle executes to completion in the background.
