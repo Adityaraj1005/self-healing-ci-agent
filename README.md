@@ -158,3 +158,17 @@ GROQ_API_KEY=your_groq_api_key_here
 2. Open a separate terminal and issue a mock CI/CD failure webhook:
    Invoke-RestMethod -Uri "[http://127.0.0.1:8000/webhook](http://127.0.0.1:8000/webhook)" -Method POST -Headers @{"Content-Type"="application/json"} -Body '{"repo_name": "sandbox_repo", "branch": "main", "trigger_reason": "test_failure"}'
 3. Observe the asynchronous trigger dispatch in the server console and confirm the repair cycle executes to completion in the background.
+
+
+
+---
+
+## 🧗 Challenges Faced & Solutions
+
+### 1. Finding Which File Actually Had the Bug
+- **The Problem:** When a test fails, the error message indicates what failed, but not where the broken function is implemented across multiple project files. Simple text search often returned false positives like comments, tests, or docstrings.
+- **The Fix:** Used Python's built-in `ast` (Abstract Syntax Tree) module in `repo_mapper.py` to parse the project's code structure and map every function and class directly to its exact file.
+
+### 2. Preventing Infinite AI Repair Loops
+- **The Problem:** If an automated patch introduced a new bug, a basic agent loop could repeatedly attempt fixes indefinitely, burning API tokens and getting stuck in cycles.
+- **The Fix:** Built the workflow using LangGraph as a finite state machine with strict condition checks and a hard limit of 3 repair attempts before stopping and alerting the user.
