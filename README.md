@@ -33,37 +33,17 @@ This project implements an active, self-healing CI loop:
 
 ## 🏛️ System Architecture & Workflow Diagram
 
-+------------------------------------+
-|  GitHub / CI Test Failure Webhook  |
-+-----------------+------------------+
-                  |
-                  v
-+-----------------+------------------+
-|          FastAPI Server            | (Non-blocking background worker)
-+-----------------+------------------+
-                  |
-                  v
-+-----------------+------------------+
-|       LangGraph StateGraph         |<--------------------------------+
-|           (AgentState)             |                                 |
-+-----------------+------------------+                                 |
-                  |                                                    |
-                  v                                                    |
-+-----------------+------------------+                                 |
-|          run_tests_node            |                                 |
-|       (Docker python:3.10)         |                                 |
-+-----------------+------------------+                                 |
-                  |                                                    |
-          [ Tests Passed? ]                                            |
-           |             |                                             |
-           | Yes         | No (Iter < Max)                             |
-           v             v                                             |
-     +-----------+ +-----+------------------+                          |
-     |  END (✅)  | |   patch_code_node      |                          |
-     +-----------+ | - AST Symbol Lookup    |                          |
-                   | - Groq LLM Inference   |                          |
-                   | - Disk Write Sync      |--------------------------+
-                   +------------------------+
+```mermaid
+flowchart TD
+    A[GitHub / CI Test Failure Webhook] --> B[FastAPI Server]
+    B -->|BackgroundTasks| C[LangGraph StateGraph Engine]
+    C --> D[run_tests_node<br/>Docker Container: python:3.10-slim]
+    D --> E{check_test_status<br/>Conditional Edge Router}
+    E -->|Exit Code == 0| F[END: Success ✅]
+    E -->|Iterations >= Max| G[END: Escalate Alert 🛑]
+    E -->|Exit Code != 0| H[patch_code_node<br/>1. AST Symbol Lookup<br/>2. Groq LLM Inference<br/>3. Disk Write Sync]
+    H --> D
+```
 
 ---
 
@@ -176,5 +156,5 @@ GROQ_API_KEY=your_groq_api_key_here
 1. Launch the FastAPI service:
    python server.py
 2. Open a separate terminal and issue a mock CI/CD failure webhook:
-   Invoke-RestMethod -Uri "http://127.0.0.1:8000/webhook" -Method POST -Headers @{"Content-Type"="application/json"} -Body '{"repo_name": "sandbox_repo", "branch": "main", "trigger_reason": "test_failure"}'
+   Invoke-RestMethod -Uri "[http://127.0.0.1:8000/webhook](http://127.0.0.1:8000/webhook)" -Method POST -Headers @{"Content-Type"="application/json"} -Body '{"repo_name": "sandbox_repo", "branch": "main", "trigger_reason": "test_failure"}'
 3. Observe the asynchronous trigger dispatch in the server console and confirm the repair cycle executes to completion in the background.
