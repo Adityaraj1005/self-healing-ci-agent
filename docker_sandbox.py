@@ -21,16 +21,15 @@ def run_tests_in_sandbox() -> dict:
     container = None
     try:
         # Create and run container without auto-remove so we can extract logs safely
-      # NEW VERSION:
         container = client.containers.run(
             image="python:3.10-slim",
-            command='sh -c "pip install --quiet --disable-pip-version-check pytest && PYTHONPATH=/workspace pytest -v /workspace/tests"',
+            command=f"sh -c 'pip install pytest && PYTHONPATH=/workspace pytest -v /workspace/tests'",
             volumes=volumes,
-            working_dir="/workspace",
+            network_mode="none",
+            mem_limit="512m",
+            nano_cpus=1000000000,
             detach=True,
-            remove=False,
         )
-        
 
         # Wait for the command to finish and get exit code
         result = container.wait()

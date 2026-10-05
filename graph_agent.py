@@ -1,18 +1,18 @@
-import json
 import os
+import re
 from typing import TypedDict
-import docker
 from dotenv import load_dotenv
 from groq import Groq
-from langgraph.graph import END, StateGraph
+from langgraph.graph import StateGraph, END
 
-from repo_mapper import build_repo_map, find_symbol_file
-from traceback_parser import parse_pytest_output
+from docker_sandbox import run_tests_in_docker
+from traceback_parser import extract_failure_details
+from repo_mapper import scan_repository, find_symbol_file
 
 load_dotenv()
 client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-docker_client = docker.from_env()
 
+# 1. State Definition
 class AgentState(TypedDict):
     repo_path: str
     test_passed: bool
@@ -20,110 +20,126 @@ class AgentState(TypedDict):
     iteration: int
     max_iterations: int
 
-def run_tests_node(state: AgentState) -> dict:
-    host_repo_path = os.path.abspath(state["repo_path"])
-    print(f"\n🐳 [Node: run_tests] Running tests inside Docker on {host_repo_path}...")
 
-    volumes = {host_repo_path: {"bind": "/workspace", "mode": "rw"}}
-    container = None
-    try:
-        container = docker_client.containers.run(
-            image="python:3.10-slim",
-            command='sh -c "pip install --quiet --disable-pip-version-check pytest && PYTHONPATH=/workspace pytest -v /workspace/tests"',
-            volumes=volumes,
-            working_dir="/workspace",
-            detach=True,
-            remove=False,
-        )
-        result = container.wait()
-        exit_code = result.get("StatusCode", 1)
-        logs = container.logs(stdout=True, stderr=True).decode("utf-8", errors="replace")
+# 2. Node: Run Tests
+def run_tests_node(state: AgentState) -> AgentState:
+    print(f"\n--- [Iteration {state['iteration']}/{state['max_iterations']}] Running Tests in Docker ---")
+    passed, logs = run_tests_in_docker(state["repo_path"])
+    return {
+        **state,
+        "test_passed": passed,
+        "error_logs": logs,
+    }
 
-        passed = exit_code == 0
-        print(f"   >>> Exit Code: {exit_code} | Status: {'PASSED ✅' if passed else 'FAILED ❌'}")
-        return {"test_passed": passed, "error_logs": logs}
-    except Exception as e:
-        return {"test_passed": False, "error_logs": str(e)}
-    finally:
-        if container:
-            try:
-                container.remove(force=True)
-            except Exception:
-                pass
 
-def patch_code_node(state: AgentState) -> dict:
-    current_iter = state["iteration"] + 1
-    print(f"\n🧠 [Node: patch_code] Generating patch (Attempt {current_iter})...")
+# 3. Node: Patch Code
+def patch_code_node(state: AgentState) -> AgentState:
+    print("\n--- Analyzing Failure & Generating Patch ---")
+    parsed = extract_failure_details(state["error_logs"])
+    
+    # Static Analysis: locate the target file defining the failed symbol
+    repo_map = scan_repository(state["repo_path"])
+    target_file = find_symbol_file(repo_map, parsed["failing_symbol"])
+    
+    if not target_file:
+        # Fallback to the test file itself if symbol location fails
+        target_file = os.path.join(state["repo_path"], parsed["test_file"])
+    
+    # -------------------------------------------------------------------------
+    # Guard against reward hacking: never permit writes to the test suite
+    # -------------------------------------------------------------------------
+    normalized_path = target_file.replace("\\", "/")
+    if "/tests/" in normalized_path or normalized_path.endswith("/tests") or os.path.basename(normalized_path).startswith("test_"):
+        print(f"🛑 Security violation: Attempted write to test suite '{target_file}' blocked!")
+        return {
+            **state,
+            "iteration": state["iteration"] + 1,
+            "error_logs": "Security violation: Agent attempted to modify test files to pass verification.",
+        }
 
-    repo_path = state["repo_path"]
-    repo_map = build_repo_map(repo_path)
-    symbol_target = "percentage"
-    found_file = find_symbol_file(repo_map, symbol_target)
+    print(f"🎯 Target file identified: {target_file}")
+    with open(target_file, "r") as f:
+        file_content = f.read()
 
-    target_file_path = os.path.join(repo_path, found_file or "src/math_helpers.py").replace("\\", "/")
-    print(f"   >>> AST Located Symbol '{symbol_target}' in: {target_file_path}")
-
-    with open(target_file_path, "r", encoding="utf-8") as f:
-        current_content = f.read()
-
-    prompt = (
-        f"You are a Python bug-fixing engine.\n"
-        f"Failing test log:\n{state['error_logs']}\n\n"
-        f"Current code of {target_file_path}:\n{current_content}\n\n"
-        f"Provide ONLY the complete fixed Python code for {target_file_path}.\n"
-        f"Do not include backticks, markdown, or explanations. Return pure raw python code."
+    system_prompt = (
+        "You are an automated software repair engineer. Fix the failing code.\n"
+        "Return ONLY the complete updated file content wrapped in a single ```python block.\n"
+        "Do not include any introductory remarks, markdown explanations, or postscripts."
+    )
+    user_prompt = (
+        f"Failing Test Name: {parsed['test_name']}\n"
+        f"Exception & Trace: {parsed['error_message']}\n\n"
+        f"Current File Content:\n{file_content}"
     )
 
     response = client.chat.completions.create(
-        model="openai/gpt-oss-120b",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.0,
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        temperature=0.0
     )
 
-    patched_code = response.choices[0].message.content.strip()
-    if patched_code.startswith("```"):
-        lines = patched_code.split("\n")
-        patched_code = "\n".join(lines[1:-1])
+    raw_patch = response.choices[0].message.content
+    match = re.search(r"```python\n(.*?)```", raw_patch, re.DOTALL)
+    cleaned_code = match.group(1) if match else raw_patch
 
-    with open(target_file_path, "w", encoding="utf-8") as f:
-        f.write(patched_code)
-    print(f"   >>> Successfully applied patch to {target_file_path} ✏️")
+    # Write patched code to disk
+    with open(target_file, "w") as f:
+        f.write(cleaned_code)
+    print(f"💾 Applied patch to: {target_file}")
 
-    return {"iteration": current_iter}
-
-def check_test_status(state: AgentState) -> str:
-    if state["test_passed"]:
-        print("\n🎉 [Router] Tests passed! Navigating to END.")
-        return "end"
-
-    if state["iteration"] >= state["max_iterations"]:
-        print(f"\n🛑 [Router] Reached max iterations ({state['max_iterations']}). Navigating to END.")
-        return "end"
-
-    print("\n🔁 [Router] Tests failed. Navigating to patch_code.")
-    return "patch_code"
-
-workflow = StateGraph(AgentState)
-workflow.add_node("run_tests", run_tests_node)
-workflow.add_node("patch_code", patch_code_node)
-workflow.set_entry_point("run_tests")
-workflow.add_conditional_edges("run_tests", check_test_status, {"end": END, "patch_code": "patch_code"})
-workflow.add_edge("patch_code", "run_tests")
-
-app = workflow.compile()
-
-if __name__ == "__main__":
-    initial_state = {
-        "repo_path": "sandbox_repo",
-        "test_passed": False,
-        "error_logs": "",
-        "iteration": 0,
-        "max_iterations": 3,
+    return {
+        **state,
+        "iteration": state["iteration"] + 1,
     }
 
-    print("🚀 Starting LangGraph Autonomous Repair Workflow...")
-    final_output = app.invoke(initial_state)
 
-    print("\n🏁 Workflow Execution Complete!")
-    print(f"Final Test Status: {'PASSED ✅' if final_output['test_passed'] else 'FAILED ❌'}")
-    print(f"Total Iterations: {final_output['iteration']}")
+# 4. Conditional Edge Router
+def check_test_status(state: AgentState) -> str:
+    if state["test_passed"]:
+        return "passed"
+    if state["iteration"] >= state["max_iterations"]:
+        return "max_iterations"
+    return "failed"
+
+
+# 5. Build StateGraph Workflow
+workflow = StateGraph(AgentState)
+
+workflow.add_node("run_tests", run_tests_node)
+workflow.add_node("patch_code", patch_code_node)
+
+workflow.set_entry_point("run_tests")
+
+workflow.add_conditional_edges(
+    "run_tests",
+    check_test_status,
+    {
+        "passed": END,
+        "failed": "patch_code",
+        "max_iterations": END,
+    },
+)
+
+workflow.add_edge("patch_code", "run_tests")
+
+repair_graph = workflow.compile()
+
+
+if __name__ == "__main__":
+    target_repo = os.path.abspath("sandbox_repo")
+    initial_state: AgentState = {
+        "repo_path": target_repo,
+        "test_passed": False,
+        "error_logs": "",
+        "iteration": 1,
+        "max_iterations": 3,
+    }
+    
+    final_output = repair_graph.invoke(initial_state)
+    if final_output["test_passed"]:
+        print("\n✅ Verification Succeeded: All tests passed inside Docker sandbox!")
+    else:
+        print("\n❌ Verification Failed: Maximum repair iterations reached without passing tests.")
