@@ -30,6 +30,7 @@ def run_tests_in_sandbox() -> dict:
             detach=True,
             remove=False,
         )
+        
 
         # Wait for the command to finish and get exit code
         result = container.wait()
